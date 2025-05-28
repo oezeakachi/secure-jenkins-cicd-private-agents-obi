@@ -1,0 +1,92 @@
+---
+# tasks file for jenkins-slave
+
+- name: Ensure jenkins user exists
+  user:
+    name: jenkins
+    state: present
+    shell: /bin/bash
+
+- name: Ensure Jenkins agent work directory exists
+  file:
+    path: "{{ jenkins_agent_workdir | default('/home/jenkins/agent') }}"
+    state: directory
+    owner: jenkins
+    group: jenkins
+    mode: "0755"
+  become: true
+
+- name: Read Jenkins agent secret from control machine
+  slurp:
+    src: secrets/agent-secret.txt
+  register: jenkins_agent_secret_raw
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: Set Jenkins agent secret fact (local)
+  set_fact:
+    jenkins_secret: "{{ jenkins_agent_secret_raw.content | b64decode }}"
+  delegate_to: localhost
+  run_once: true
+
+- name: Copy Jenkins agent secret to remote server
+  copy:
+    content: "{{ jenkins_secret }}"
+    dest: "{{ jenkins_agent_workdir }}/agent-secret.txt"
+    owner: jenkins
+    group: jenkins
+    mode: "0600"
+  become: true
+
+- name: Install OpenJDK 17 JRE
+  apt:
+    name: openjdk-17-jre
+    state: present
+    update_cache: yes
+  become: true
+
+- name: Download Jenkins agent jar
+  get_url:
+    url: "{{ jenkins_url }}/jnlpJars/agent.jar"
+    dest: "{{ jenkins_agent_workdir }}/agent.jar"
+    mode: "0755"
+    owner: jenkins
+    group: jenkins
+  become: true
+
+- name: Create systemd service for Jenkins agent
+  copy:
+    dest: /etc/systemd/system/jenkins-agent.service
+    content: |
+      [Unit]
+      Description=Jenkins Agent
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=jenkins
+      WorkingDirectory={{ jenkins_agent_workdir }}
+      ExecStart=/usr/bin/java -jar {{ jenkins_agent_workdir }}/agent.jar \
+        -url {{ jenkins_url }} \
+        -secret {{ jenkins_secret }} \
+        -name "{{ jenkins_agent_name }}" \
+        -webSocket \
+        -workDir {{ jenkins_agent_workdir }}
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+  become: true
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+  become: true
+
+- name: Enable and start Jenkins agent service
+  systemd:
+    name: jenkins-agent
+    enabled: yes
+    state: started
+  become: true

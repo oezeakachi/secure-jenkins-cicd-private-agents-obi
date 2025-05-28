@@ -1,0 +1,34 @@
+---
+- name: Setup Jenkins Master and Slave
+  hosts: all
+  gather_facts: false
+  roles:
+    - docker
+
+- name: Configure Jenkins Master
+  hosts: public_servers
+  gather_facts: false
+  roles:
+    - jenkins-master
+
+- name: Load JNLP secret
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Read agent secret from local machine
+      slurp:
+        src: ./secrets/agent-secret.txt
+      register: jenkins_agent_secret
+  run_once: true
+  become: false
+
+- name: Configure Jenkins Slave
+  hosts: private_servers
+  gather_facts: false
+  vars:
+    jenkins_secret: "{{ hostvars['localhost']['jenkins_agent_secret']['content'] | b64decode }}"
+    jenkins_url: "http://{{ hostvars['bastion']['bastion_ip'] }}:8080"
+    jenkins_agent_name: "slave-01"
+    jenkins_agent_workdir: "/home/jenkins/agent"
+  roles:
+    - jenkins-slave

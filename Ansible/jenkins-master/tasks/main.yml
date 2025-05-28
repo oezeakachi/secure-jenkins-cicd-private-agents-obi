@@ -1,0 +1,100 @@
+---
+# tasks file for jenkins-master
+- name: Ensure Jenkins home directory exists on host
+  file:
+    path: /var/jenkins_home
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Fix permissions on Jenkins home directory
+  command: chown -R 1000:1000 /var/jenkins_home
+  become: true
+
+- name: Ensure Jenkins init directory exists on remote host
+  file:
+    path: /opt/jenkins-init
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Copy AutoConfigJenkins.groovy to remote host
+  copy:
+    src: "{{ role_path }}/files/AutoConfigJenkins.groovy"
+    dest: /opt/jenkins-init/AutoConfigJenkins.groovy
+
+- name: Copy Secrets.groovy to remote host
+  copy:
+    src: "{{ role_path }}/files/Secrets.groovy"
+    dest: /opt/jenkins-init/Secrets.groovy
+
+- name: Copy custom Jenkins Docker build context to remote host
+  copy:
+    src: "{{ role_path }}/files/custom-jenkins/"
+    dest: /tmp/custom-jenkins/
+    mode: "0755"
+
+- name: Build custom Jenkins image with pre-installed plugins
+  community.docker.docker_image:
+    name: custom-jenkins
+    source: build
+    build:
+      path: /tmp/custom-jenkins
+    state: present
+
+- name: Run Jenkins container with pre-installed plugins
+  docker_container:
+    name: jenkins-master
+    image: custom-jenkins:latest
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - /var/jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/jenkins-init/AutoConfigJenkins.groovy:/usr/share/jenkins/ref/init.groovy.d/AutoConfigJenkins.groovy
+      - /opt/jenkins-init/Secrets.groovy:/usr/share/jenkins/ref/init.groovy.d/Secrets.groovy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      retries: 5
+      timeout: 10s
+
+- name: Wait for Jenkins HTTP to respond with 200, 302 or 403 on root
+  uri:
+    url: "http://localhost:8080/"
+    return_content: no
+    status_code:
+      - 200
+      - 302
+      - 403
+    follow_redirects: none
+  register: jenkins_ready
+  retries: 10
+  delay: 10
+  until: jenkins_ready.status in [200, 302, 403]
+  ignore_errors: true
+
+- name: Check if agent-secret.txt exists
+  stat:
+    path: /var/jenkins_home/agent-secret.txt
+  register: agent_secret_status
+
+- name: Ensure local secrets directory exists
+  delegate_to: localhost
+  run_once: true
+  file:
+    path: "{{ playbook_dir }}/secrets"
+    state: directory
+    mode: "0755"
+  become: false
+
+- name: Fetch agent secret from Jenkins master
+  when: agent_secret_status.stat.exists
+  fetch:
+    src: /var/jenkins_home/agent-secret.txt
+    dest: ./secrets/agent-secret.txt
+    flat: yes
